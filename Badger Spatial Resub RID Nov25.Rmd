@@ -1,0 +1,1439 @@
+---
+title: "Badger Spatial MoL Ecol Resubmission"
+author: "Xav Harrison"
+date: "2025-06-18"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+# Libraries and Data
+
+## Libraries
+```{r}
+  library(phyloseq)
+  library(dplyr)
+  library(decontam)
+  library(ggplot2)
+  library(vegan)
+  library(ggordiplots)
+  library(microbiome)
+  library(pheatmap)
+  library(cowplot)
+  library(RColorBrewer)
+  #library(ggvegan)
+  library(ggrepel)
+  #remotes::install_github("yiluheihei/microbiomeMarker")
+  library(microbiomeMarker)
+  library(gllvm)
+  #devtools::install_github("microsud/microbiomeutilities")
+  library(microbiomeutilities)
+  #devtools::install_github("BlakeRMills/MoMAColors")
+  library(MoMAColors)
+  #BiocManager::install("MicrobiotaProcess")
+  #library(MicrobiotaProcess)
+  library(Polychrome)
+  #library(ecodist)
+  
+
+```
+
+## Global Plotting Options 
+Quick access options for output graphics to make legends and axis labels larger / more legible
+
+```{r}
+
+#Global Plot Options
+            plotopts<- theme(axis.text.y=element_text(size=20),axis.text.x=element_text(size=12),axis.title=element_text(size=20),strip.text=element_text(size=20),legend.title = element_text(size=20),legend.text = element_text(size=20)) 
+
+#Smalller Legend Labs
+            plotopts2<- theme(axis.text.y=element_text(size=20),axis.text.x=element_text(size=12),axis.title=element_text(size=20),strip.text=element_text(size=20),legend.title = element_text(size=15),legend.text = element_text(size=12)) 
+
+## Global Site Colors
+  sitecols<-c(brewer.pal(8,"Set2"),brewer.pal(9,"Paired")[9])
+
+
+###### Stop Warnings turning into Errors
+  options(warn=1)
+```
+
+## Microbiome Data
+```{r}
+
+  ps_woodchester<-readRDS('Woodchester Phyloseq Jun25 RID.Rdata')
+
+```
+
+# Decontamination 
+
+## Data Cleanup 
+```{r}
+
+############ DATA CLEANUP 
+  
+  #Prune Taxa With No Phylum Assignment 
+    ps_prune<-prune_taxa(as.vector(!is.na(tax_table(ps_woodchester)[,2])),ps_woodchester)
+      ntaxa(ps_woodchester)-ntaxa(ps_prune) 
+      
+  #Prune Chloroplasts
+      ps_prune_nochloro<-prune_taxa(as.vector(tax_table(ps_prune)[,4]!="Chloroplast"),ps_prune)
+      ntaxa(ps_prune)-ntaxa(ps_prune_nochloro) 
+      
+  #Remove Mitochondria    
+      ps_prune_nochloro_nomito<-prune_taxa(as.vector(tax_table(ps_prune_nochloro)[,5]!="Mitochondria"),ps_prune_nochloro)
+      
+  #Remove Archaea  
+    ps_prune_nochloro_nomito_noarchaea<-prune_taxa(as.vector(tax_table(ps_prune_nochloro_nomito)[,1]!="Archea"),ps_prune_nochloro_nomito)
+    
+     ntaxa(ps_woodchester) - ntaxa(ps_prune_nochloro_nomito_noarchaea)
+
+
+```
+
+## Plot of Library Sizes
+```{r}
+
+      #Inspect Library Sizes
+            df <- as.data.frame(sample_data(ps_prune_nochloro_nomito_noarchaea)) # Put sample_data into a ggplot-friendly data.frame
+            df$LibrarySize <- sample_sums(ps_prune_nochloro_nomito_noarchaea)
+            df <- df[order(df$LibrarySize),]
+            df$Index <- seq(nrow(df))
+            df$sample_or_control<-ifelse(df$sampletype %in% c("negative","negative_ve"),"negative","sample")
+           
+            ggplot(data=df, aes(x=Index, y=LibrarySize,colour=sample_or_control)) + geom_point()
+        
+        
+          
+```  
+
+## Identify Contaminants
+
+```{r}
+        ##Identify Contaminants by Prevalence
+            sample_data(ps_prune_nochloro_nomito_noarchaea)$is.neg <- sample_data(ps_prune_nochloro_nomito_noarchaea)$sampletype == "negative"
+            contamdf.prev <- isContaminant(ps_prune_nochloro_nomito_noarchaea, method="prevalence", neg="is.neg",threshold=0.6,normalize=T)
+            
+          #How Many Contaminants?  
+            table(contamdf.prev$contaminant) #722
+            
+```
+
+## Plot of Contaminant Frequency by Sample Type
+Seems to be one ASV present in 3 negatives at high abundance - but decontam thinks this is contamination from true samples. Probably because it is not in the other 3 negatives
+```{r}
+
+# Make phyloseq object of presence-absence in negative controls and true samples
+  ps.pa <- transform_sample_counts(ps_prune_nochloro_nomito_noarchaea, function(abund) 1*(abund>0))
+  ps.pa.neg <- prune_samples(sample_data(ps.pa)$is.neg == TRUE, ps.pa)
+  ps.pa.pos <- prune_samples(sample_data(ps.pa)$is.neg == FALSE, ps.pa)
+
+# Make data.frame of prevalence in positive and negative samples
+  df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                      contaminant=contamdf.prev$contaminant)
+
+#Plot
+  ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+
+```
+
+### Remove Contaminants
+```{r}
+    ## Remove Contaminants
+            ps_clean<-prune_taxa(!contamdf.prev$contaminant,ps_prune_nochloro_nomito_noarchaea)
+
+     ##Remove Mocks and Negatives
+            table(sample_data(ps_clean)$sampletype)
+            ps_badger<-subset_samples(ps_clean,sampletype=="badger" & !Sample %in% c("A","B"))
+```
+
+## Filter Based on Prevalence and Abundance
+```{r}
+
+####### Read Threshold and Sample Prevalence Threshold
+  ps_clean_filter = filter_taxa(ps_badger, function(x) sum(x) > 10, TRUE)
+  #ps_clean_filter<-ps_badger
+```
+
+
+## Assessing Post-QC Sample Coverage and Library Sizes
+  
+  Now that we've done that, we can check what our post-QC library sizes are. It's a good idea to report these in manuscripts and thesis chapters. Here was ask what the minimum, maximum and mean library sizes-per-samples are. 
+  
+
+```{r}
+ ############## POST QC LIBRARY SIZES
+      
+      ###############
+      # Post-QC Library Stats
+      ###############
+      
+      mean(sample_sums(ps_clean_filter))
+      range(sample_sums(ps_clean_filter))
+```      
+      
+
+## Sample Rarefaction 
+
+```{r}
+
+# #GG Version Using MicrobiotaProcess
+#     set.seed(1024) # for reproducibly random number
+#     options(warn=-1)
+#     rareres <- get_rarecurve(obj=ps_clean_filter,chunks=100)
+# 
+#   #Plot  
+#     p_rare <- ggrarecurve(obj=rareres,
+#                       indexNames=c("Observe","Shannon"),
+#                       ) +
+#           theme(legend.spacing.y=unit(0.01,"cm"),
+#                 legend.text=element_text(size=4))
+# 
+# taxa_are_rows(ps_clean_filter)
+# Base R/ Vegan Implementation 
+  badger_matrix<-  t(as(otu_table(ps_clean_filter),"matrix"))
+  raremax <- min(rowSums(badger_matrix))
+
+  rarecurve(badger_matrix,step=50,cex=0.5,sample=raremax)
+
+
+```
+
+## Final Processing and Sample Summary Stats
+
+### Sample Stats
+
+```{r}
+
+#Badgers
+  length(unique(sample_data(ps_clean_filter)$id))
+
+
+#Infection
+    table(sample_data(ps_clean_filter)$day0_cdp)
+
+#Known Age
+    table(sample_data(ps_clean_filter)$age_fc) 
+    length(unique(sample_data(ps_clean_filter)$id[sample_data(ps_clean_filter)$age_fc =="CUB"]))
+
+```
+
+# More Metadata
+
+## Infection
+```{r}
+
+#Badgers with Longitudinal Test Data
+  infection_meta<-read.csv('Badger Tb Test Data for Spatial.csv')
+
+#Infection Grouping
+  infection_meta$btb_status<-"Unexposed"
+  infection_meta$btb_status[which(infection_meta$culture=="Positive")]<-"Excreter"
+  infection_meta$btb_status[which(infection_meta$igy=="Positive" & infection_meta$culture=="Negative"|infection_meta$statpak2=="Positive" & infection_meta$culture=="Negative")]<-"Exposed"
+  table(infection_meta$btb_status)
+  
+#Carry Across Swab Date
+  woodchester_meta<-as(sample_data(ps_clean_filter),"data.frame")
+  
+#Test Left Join
+  woodchester_meta_btb<-left_join(woodchester_meta,infection_meta,"id")
+  
+## DId Culture Test Occur Before Microbiome Swab
+    woodchester_meta_btb$culture_before_sample<-with(woodchester_meta_btb,culture_first_pos <= sampledate_julian)
+  ## Did IG Test Occur Before Microbiome Swab
+    woodchester_meta_btb$igy_before_sample<-with(woodchester_meta_btb,ig_first_pos <= sampledate_julian) 
+  ## Did StatPak Test Occur Before Microbiome Swab
+    woodchester_meta_btb$statpak_before_sample<-with(woodchester_meta_btb,statpak_first_pos <= sampledate_julian)
+    
+  ### Tabulate To See Variation 
+    with(woodchester_meta_btb,table(culture_before_sample,id))
+    
+  ## Create New Variable
+      btb_status_time<-rep(NA,nrow(woodchester_meta_btb))
+      btb_status_time[which(woodchester_meta_btb$culture=="Positive" & woodchester_meta_btb$culture_before_sample==FALSE)]<-"Future Excreter" #flag as these might have been exposed 
+      btb_status_time[which(woodchester_meta_btb$culture=="Positive" & woodchester_meta_btb$culture_before_sample==TRUE)]<-"Excreter"
+      btb_status_time[which(woodchester_meta_btb$btb_status=="Unexposed")]<-"Unexposed"
+      btb_status_time[which(woodchester_meta_btb$igy=="Positive" & woodchester_meta_btb$igy_before_sample==TRUE  & woodchester_meta_btb$culture=="Negative")]<-"Exposed"
+        btb_status_time[which(woodchester_meta_btb$statpak2=="Positive" & woodchester_meta_btb$statpak_before_sample==TRUE & woodchester_meta_btb$culture=="Negative")]<-"Exposed"
+      btb_status_time[which(woodchester_meta_btb$igy=="Positive" & woodchester_meta_btb$igy_before_sample==FALSE  & woodchester_meta_btb$culture=="Negative" & woodchester_meta_btb$statpak2!="Positive")]<-"Future Exposed"
+       btb_status_time[which(woodchester_meta_btb$statpak2=="Positive" & woodchester_meta_btb$statpak_before_sample==FALSE  & woodchester_meta_btb$culture=="Negative" & woodchester_meta_btb$igy!="Positive")]<-"Future Exposed"
+   
+
+#Now Sort Out the Future Excreters - Were these exposed?
+    woodchester_meta_btb_fe<- subset(woodchester_meta_btb,btb_status_time=="Future Excreter")
+    woodchester_meta_btb_fe$ig_first_pos< woodchester_meta_btb_fe$sampledate_julian #all exposed 
+    
+    if(all(woodchester_meta_btb_fe$ig_first_pos< woodchester_meta_btb_fe$sampledate_julian)){
+      print("All Future Excreters Have a Positive IG result")
+    } else {stop("Not all badgers exposed before test result")}
+    
+    
+### Create Collapsed Version 
+    btb_status_time_collapsed<-btb_status_time
+    btb_status_time_collapsed[which(btb_status_time_collapsed=="Future Excreter")]<-"Exposed"
+        btb_status_time_collapsed[which(btb_status_time_collapsed=="Future Exposed")]<-"Unexposed"
+
+    ### Tabulate Overall
+     table(btb_status_time_collapsed,useNA="always")
+     
+    ### Tabulate bu ID
+        table(btb_status_time,woodchester_meta_btb$id)
+      
+### Add on to DF
+  woodchester_meta_btb$btb_status_time<-btb_status_time_collapsed
+
+
+### Variation in Time Since Excreting?
+      woodchester_meta_btb_excreter<-woodchester_meta_btb %>% filter(btb_status_time=="Excreter")   
+     range(woodchester_meta_btb_excreter$sampledate_julian -  woodchester_meta_btb_excreter$culture_first_pos,na.rm=T)
+
+### Variation in Time Since Exposed?
+     woodchester_meta_btb_exposed<-woodchester_meta_btb %>% filter(btb_status_time=="Exposed")   
+     range(woodchester_meta_btb_exposed$sampledate_julian -  woodchester_meta_btb_exposed$ig_first_pos,na.rm=T)
+      range(woodchester_meta_btb_exposed$sampledate_julian -  woodchester_meta_btb_exposed$statpak_first_pos,na.rm=T)     
+
+#### REBIND ONTO PHYLOSEQ
+      rownames(woodchester_meta_btb)<-woodchester_meta_btb$Sample
+      sample_data(ps_clean_filter)<-woodchester_meta_btb
+
+```
+
+## Comparison of Continuous Tb Infection vs Categorical
+```{r}
+exposed_day0_comparisonplot1<-woodchester_meta_btb %>% filter(!is.na(btb_status_time)) %>% ggplot(.,aes(x=btb_status_time,y=day0_cdp))  + geom_point(position = position_jitter(width=0.1),shape=21,size=5,fill="white") + theme_bw(base_size=15) + labs(x="Categorical Infection Status",y="Infection Probability")
+ggsave2('Categorical Tb Exposure Comparison Plot.png',exposed_day0_comparisonplot1)
+
+#subset(woodchester_meta_btb,btb_status_time=="Unexposed" & day0_cdp>0.25)
+#subset(woodchester_meta_btb,btb_status_time=="Exposed" & day0_cdp>0.75)
+
+```
+
+## Global Tb Category Colours
+```{r}
+## Colours 
+
+ tbcols<-moma.colors("Palermo",n=3)
+  names(tbcols)<-c("Unexposed","Excreter","Exposed")
+```
+
+# Alpha Diversity 
+
+## Rarefy
+```{r}
+
+#Minimum Read Depth   
+  min(sample_sums(ps_clean_filter))
+
+#Rarefy 
+  ps_rare<-rarefy_even_depth(ps_clean_filter,rngseed = 10112022,sample.size = 13569)
+ 
+
+#Richness
+  badger_rich<-estimate_richness(ps_rare,measures = c("Observed","Shannon"))
+  badger_rich$Sample<- sample_data(ps_rare)$Sample
+  badger_rich<-left_join(badger_rich,woodchester_meta_btb,"Sample")
+  
+##Filter
+  table(badger_rich$social_group,useNA="ifany")
+  badger_rich$year_social<-with(badger_rich,paste(capture_year,social_group,sep="_"))
+  year_social_table<-table( badger_rich$year_social)
+  
+#Filter to Only Cases Where there are 3 or more data points
+  year_social3<-names(year_social_table)[year_social_table>2]
+  badger_rich_filter3<-subset(badger_rich,year_social %in% year_social3)
+
+```
+
+## Richness Plots
+
+### Social Group
+```{r}
+
+## All Badgers
+  richplot1<-ggplot(badger_rich,aes(x=social_group,y=Observed)) + geom_point(fill=moma.colors("Levine2")[3],colour="white",shape=21,size=5)+ facet_grid(capture_year~.)
+  richplot2<- richplot1 + stat_summary(fun.data = "mean_cl_boot", colour = "black", linewidth = 1,shape=23,fill="white") + theme_bw() + labs(x="Social Group",y="Observed Bacterial \n Richness") + guides(fill="none") + theme(axis.text.x = element_text(angle = 45, hjust=1)) + theme(strip.text.y = element_text(size=18),axis.text = element_text(size=12),axis.title=element_text(size=15))
+  richplot2
+    #ggsave2('Richness All Badgers All Years.pdf',richplot2,width=15,height=15,units="cm")
+      #ggsave2('Richness All Badgers All Years.tiff',richplot2,width=15,height=15,units="cm")
+
+
+#Tabulate
+    badger_social_tab<-with(badger_rich,table(social_group,capture_year))  
+    #write.csv(badger_social_tab,'Badger Social Group By Year.csv')
+      
+      
+```
+
+### bTb Status - Categories 
+```{r}
+badger_rich$btb_status_time<-factor(badger_rich$btb_status_time,levels=c("Unexposed","Exposed","Excreter"))
+
+ richplot_tbcat1<-filter(badger_rich,!is.na(btb_status_time)) %>% ggplot(.,aes(x=btb_status_time,y=Observed)) + geom_boxplot(outliers = FALSE) + geom_point(size=5,shape=21,colour="white",aes(fill=btb_status_time),position = position_jitter(width=0.2),alpha=0.7) + theme_bw(base_size = 15)
+ richplot_tbcat2<- richplot_tbcat1 + labs(fill="bTb Status",y="Observed Bacterial Richness",x="bTb Status") + scale_fill_manual(values = tbcols) + guides(fill="none")
+ richplot_tbcat2
+ ggsave2('Richness by bTb Category.png',richplot_tbcat2)
+```
+
+### Richness by bTb Category by Individual 
+```{r}
+richplot_tbcat2 + facet_wrap(.~id)
+```
+
+### bTb Status - Probability of Infection 
+```{r}
+
+tb_lab<-expression(paste(italic("M. bovis  "), "Infection Probability"))
+
+#Sample size
+  nrow(badger_rich)
+  
+#All Badgers
+  richplot_tb1<-ggplot(badger_rich,aes(x=day0_cdp,y=Observed)) + geom_smooth(method="lm") + geom_point(size=5,shape=21,colour="white",fill=moma.colors("Levine2")[3]) + facet_grid(.~capture_year) + theme_bw(base_size = 15)
+ richplot_tb2<- richplot_tb1 + labs(x=tb_lab,y="Observed Bacterial \n Richness") 
+ richplot_tb2
+  #ggsave2('All Badgers Continuous Tb Status by Year.pdf',richplot_tb2,width=22,height=10,units="cm")
+
+```
+
+### Tb Within Social Group - Continuous
+
+```{r}
+
+##Filter To At Least 5 Per Group 
+  rich_filter_tb_tab<-with(badger_rich,table(social_group))
+  rich_filter_tb_tab_filtergroups<-rownames(rich_filter_tb_tab)[rich_filter_tb_tab>4]
+  rich_filter_tb_filter<-subset(badger_rich,social_group %in% rich_filter_tb_tab_filtergroups)
+
+#All Badgers
+  richplot_tb_soc1<-ggplot(rich_filter_tb_filter,aes(x=day0_cdp,y=Observed)) + geom_smooth(method="lm") + geom_point(size=5,shape=21,colour="white",fill=moma.colors("Levine2")[3]) + facet_wrap(.~social_group) + theme_bw(base_size = 15) + labs(x=tb_lab,y="Observed Bacterial \n Richness")
+  richplot_tb_soc1
+  #ggsave2('All Badgers Tb Status by Social Group.pdf',richplot_tb_soc1,width=30,height=22,units="cm")
+
+
+```
+
+### Tb Within Social Group - Category
+
+```{r}
+
+##Filter To At Least 5 Per Group 
+  rich_filter_tb_tab<-with(badger_rich,table(social_group))
+  rich_filter_tb_tab_filtergroups<-rownames(rich_filter_tb_tab)[rich_filter_tb_tab>4]
+  rich_filter_tb_filter<-subset(badger_rich,social_group %in% rich_filter_tb_tab_filtergroups & !is.na(btb_status_time))
+
+#All Badgers
+  richplot_tb_statustime_soc1<-ggplot(rich_filter_tb_filter,aes(x=btb_status_time,y=Observed)) + geom_smooth(method="lm") + geom_point(size=5,shape=21,colour="white",aes(fill=btb_status_time),position = position_jitter(width=0.2)) + facet_wrap(.~social_group) + theme_bw(base_size = 15) + labs(x="bTb Status",y="Observed Bacterial \n Richness",fill="bTb Status") + scale_fill_manual(values=tbcols) + theme(axis.text.x=element_text(angle=45,hjust=1),legend.position="top")
+  richplot_tb_statustime_soc1
+  #ggsave2('All Badgers Tb Categorical Status by Social Group.png',richplot_tb_statustime_soc1,width=30,height=22,units="cm")
+
+
+```
+
+### Richness in Excreters as a Function of Time Since Infection 
+```{r}
+badger_rich_excreter<-subset(badger_rich,btb_status_time=="Excreter")
+badger_rich_excreter$delta_time<-with(badger_rich_excreter,sampledate_julian - culture_first_pos)
+
+ggplot(badger_rich_excreter,aes(x=delta_time,y=Observed)) + geom_point(shape=21,size=5,aes(fill=id)) + theme_bw(base_size = 15)
+```
+
+
+
+### Tb Combined Plot
+```{r}
+tb_richness_plot1<-plot_grid(richplot_tb_soc1,richplot_tb2,nrow=2,labels="AUTO",label_size = 22,rel_heights = c(2,1))
+tb_richness_plot1
+#ggsave2('All Badgers Richness Continuous Tb Combined Plot.pdf',tb_richness_plot1,width=20,height=22,units="cm")
+#ggsave2('Richness Tb Combined Plot.tiff',tb_richness_plot1,width=20,height=22,units="cm")
+
+```
+
+### Mass & Condition Score 
+
+```{r}
+
+## Relevel COndition
+    badger_rich$condition<-factor(badger_rich$condition,levels=c("POOR","FAIR","GOOD","VERY GOOD"))
+  
+            #Richness Plot  by MASS 
+              mass_plot1<-badger_rich %>% filter(!is.na(weight)) %>% ggplot(.,aes(x=weight,y=Observed))  + geom_smooth(method="lm")  + geom_point(shape=21,aes(fill=condition),size=5,color="white",alpha=0.7) + theme_bw()
+              mass_plot2 <- mass_plot1+ theme(axis.text=element_text(size=20),axis.title = element_text(size=20),strip.text.x=element_text(size=20)) + labs(y="Observed Bacterial \n Richness",x="Mass (kg)")
+              mass_plot3<-mass_plot2   + facet_wrap(capture_year~.)  + labs(fill="Condition") + scale_fill_brewer(palette = "Paired")
+              mass_plot3
+             # ggsave2('Mass by Year.pdf',mass_plot3,width=25,height=10,units="cm")
+            
+
+```
+
+## Richness Models 
+
+### Data Prep
+```{r}
+library(brms)
+
+## Sex Variable
+  #badger_rich$sex<-ifelse(is.na(badger_rich$testes),"F","M")
+  with(badger_rich,table(reproc,testes,exclude = NULL))
+  subset(badger_rich,is.na(reproc) & is.na(testes))
+  
+##Filter Data to No Missing Values for Any Predictor   
+  badger_rich_complete<-badger_rich[with(badger_rich,complete.cases(weight,capture_year,toothwear,social_group,day0_cdp)),]
+  
+##Summary Stats  
+  nrow(badger_rich_complete) # 165 samples
+  length(unique(badger_rich_complete$social_group)) #18 social groups (18 in BRMS model)
+  length(unique(badger_rich_complete$capture_year)) #3 capture years
+  length(unique(badger_rich_complete$id)) #72 badgers
+
+##Factor for Cap Year  
+  badger_rich_complete$capture_year<-factor(badger_rich_complete$capture_year)
+
+```
+
+### Plots
+```{r}
+## Check Correlation Between Age and Mass
+    ggplot(badger_rich_complete,aes(x=known_age,y=weight)) + geom_smooth(method="lm",formula=y~x+I(x^2)) + geom_point(shape=21,size=5,fill="white")
+    with(badger_rich_complete,cor.test(known_age,weight))
+    
+  ### All Data Plot  
+   ggplot(badger_rich_complete,aes(x=known_age,y=Observed)) + geom_smooth(method="lm") + geom_point(shape=21,size=5,fill="white") + scale_x_continuous(n.breaks=11) + theme_bw() + plotopts + labs(y="Observed Richness",x="Age")
+    with(badger_rich_complete,cor.test(known_age,Observed))
+    
+  ### Subset to Repeat Sampled Badgers
+    badger_rich_tab<-table(badger_rich_complete$id,badger_rich_complete$known_age)
+    badger_rich_tab2<-apply(badger_rich_tab,1,function(x)sum(x>0))
+    badger_rich_complete_min3<-subset(badger_rich_complete,id %in% names(badger_rich_tab2)[badger_rich_tab2>2])
+    table(badger_rich_complete_min3$id)
+    
+#### PLOT    
+   ggplot(badger_rich_complete_min3,aes(x=known_age,y=Observed,fill=id)) + geom_smooth(method="lm",se=F) + geom_point(shape=21,size=5) + theme_bw() + plotopts + labs(y="Observed Richness",x="Age") + scale_x_continuous(n.breaks=11) + facet_wrap(.~id) + guides(fill="none")
+   
+```
+
+### Models
+
+#### Prepare Data
+```{r}
+#Fix Capture Year 
+      badger_rich_complete$capture_year<-factor(badger_rich_complete$capture_year)
+      badger_rich_complete$toothwear<-as.factor(badger_rich_complete$toothwear)
+
+#Sex
+    subset(badger_rich_complete,is.na(reproc) & is.na(testes))  
+    badger_rich_complete$sex<-ifelse(is.na(badger_rich_complete$testes),"F","M")
+    badger_rich_complete$sex[badger_rich_complete$id=="ID27"]<-"M"
+    badger_rich_complete$sex[badger_rich_complete$id=="ID32"]<-"F"
+    
+    
+## Subset to Known Age
+    badger_rich_complete_age<-subset(badger_rich_complete,!is.na(known_age))
+    
+#Sample Size
+    nrow(badger_rich_complete_age)
+    length(unique(badger_rich_complete_age$id))
+    length(unique(badger_rich_complete_age$social_group))
+
+```
+
+## Bivariate Model - Continuous bTb Infection
+```{r}
+
+library(brms)
+
+  
+    #Model For Each Outcome 
+        bf_rich<-bf(Observed ~ capture_year +  known_age + I(known_age^2) + sex + day0_cdp +  (1|p|social_group) + (1|q|id)) + poisson()
+        bf_mass<-bf(weight ~ capture_year  + known_age + I(known_age^2)  + sex + day0_cdp + (1|p|social_group) + (1|q|id)) + gaussian()
+
+  fit1 <- brm(
+  bf_rich + bf_mass + set_rescor(FALSE),
+  data = badger_rich_complete_age, chains = 4, cores = 4,
+  control = list(adapt_delta = 0.95),save_pars = save_pars(all = TRUE),
+)
+
+  summary(fit1)
+  conditional_effects(fit1)
+  bayes_R2(fit1)
+  
+  
+  pp_check(fit1,resp='Observed')
+  pp_check(fit1,resp='weight')
+
+  
+######## NULL Model Checking 
+      #Model For Each Outcome 
+        bf_rich_null<-bf(Observed ~ 1+  (1|p|social_group) + (1|q|id)) + poisson()
+        bf_mass_null<-bf(weight ~ 1 + (1|p|social_group) + (1|q|id)) + gaussian()
+  ##Fit NULL      
+    fit_null <- brm(
+    bf_rich_null + bf_mass_null + set_rescor(FALSE),
+    data = badger_rich_complete_age, chains = 4, cores = 4,
+    control = list(adapt_delta = 0.95),save_pars = save_pars(all = TRUE),
+      )
+    summary(fit_null)
+  #Add Criteria  
+        fit_null<-add_criterion(fit_null,"kfold",K=10)
+        fit1<-add_criterion(fit1,"kfold",K=10)
+
+    print(loo_compare(fit_null,fit1,criterion = "kfold"),simplify = F)
+    
+####### EPLD Checking
+    
+```
+
+### Model Plots
+```{r}
+## Richness With Age
+  agerichdata<- conditional_effects(fit1)[[3]]
+  agerichplot<-ggplot() + geom_ribbon(data=agerichdata,aes(x=known_age,ymax=upper__,ymin=lower__),fill="lightgray") + geom_line(data=agerichdata,aes(x=known_age,y=estimate__),lwd=1.5) + theme_bw(base_size = 15) + geom_point(data=badger_rich_complete_age,aes(x=known_age,y=Observed,fill=day0_cdp),shape=21,size=5,color="white") + labs(x="Chronological Age",y="Bacterial Richness",fill="Infection Probability") + scale_fill_moma_c("Exter") + theme(legend.position = "top",legend.text = element_text(size=8))
+  agerichplot
+  
+## MAss WIth Age 
+   agemassdata<- conditional_effects(fit1,conditions = data.frame(sex=c("M","F")))[[4]]
+   
+  agemassplot<-ggplot() + geom_ribbon(data=agemassdata,aes(x=known_age,ymax=upper__,ymin=lower__,fill=sex),alpha=0.5) + geom_line(data=agemassdata,aes(x=known_age,y=estimate__,color=sex),lwd=1.5) + theme_bw(base_size = 15) + geom_point(data=badger_rich_complete_age,aes(x=known_age,y=weight,fill=sex),shape=21,size=5,color="white") + labs(x="Chronological Age",y="Mass (kg)",fill="Sex") + scale_fill_moma_d("Smith") + guides(color="none")+ theme(legend.position = "top")
+  agemassplot
+  
+bivariateplot1<-plot_grid(agerichplot,agemassplot,nrow=1,labels="AUTO",label_size = 20) 
+ggsave2('Age Mass Richness Bivariate Model Plot.png',bivariateplot1,width=30,height=20,units="cm")
+```
+
+## Univariate Response Richness by Btb Category 
+```{r}
+
+#Subset to Key Categories
+  badger_rich_tbcat<-subset(badger_rich_complete,!is.na(btb_status_time))
+  table(badger_rich_tbcat$btb_status_time)
+  
+#Model 
+   badger_richmod_tbcat1<-brm(Observed ~ capture_year +  known_age + I(known_age^2) + sex + btb_status_time +  (1|p|social_group) + (1|q|id),data=badger_rich_tbcat, family=negbinomial())
+   summary(badger_richmod_tbcat1)
+```
+
+## Bivariate Model - Categorical bTb Infection
+```{r}
+
+library(brms)
+
+  
+    #Model For Each Outcome 
+        bf_rich_tbstatus<-bf(Observed ~ capture_year +  known_age + I(known_age^2) + sex + btb_status_time +  (1|p|social_group) + (1|q|id)) + poisson()
+        bf_mass_tbstatus<-bf(weight ~ capture_year  + known_age + I(known_age^2)  + sex + btb_status_time + (1|p|social_group) + (1|q|id)) + gaussian()
+
+  fit_tbstatus1 <- brm(
+  bf_rich_tbstatus + bf_mass_tbstatus + set_rescor(FALSE),
+  data = badger_rich_tbcat, chains = 4, cores = 4,
+  control = list(adapt_delta = 0.95),save_pars = save_pars(all = TRUE),
+)
+
+  summary(fit_tbstatus1)
+  conditional_effects(fit_tbstatus1)
+  
+  bayes_R2(fit_tbstatus1)
+
+  
+  pp_check(fit_tbstatus1,resp='Observed')
+  pp_check(fit_tbstatus1,resp='weight')
+
+
+```
+
+
+# Beta Diversity
+
+## Some Functions
+
+```{r}
+
+#Sample for Stripping out the ASV matrix from a phyloseq object (run all of this)
+  vegan_otu <- function(physeq) {
+    OTU <- otu_table(physeq)
+    if (taxa_are_rows(OTU)) {
+      OTU <- t(OTU)
+    }
+    return(as(OTU, "matrix"))
+  }
+  
+
+```
+
+## Stacked Barplots
+
+```{r}
+
+## Top 20 Families 
+  badger_topfam <- aggregate_top_taxa2(ps_clean_filter, "Family", top = 20)
+
+#Plot Sample Level 
+  badger_topfam %>%  
+  microbiome::transform(transform = "compositional") %>%
+  plot_composition()
+
+```
+
+
+### Year Grouping
+```{r}
+
+#Extract and Reorder
+  fams<-tax_table(badger_topfam)[,2] %>% as.vector()
+  fams_ordered<-c("Other",fams[-which(fams=="Other")])     
+
+barpal<-kelly.colors(n=21); names(barpal)<-fams
+
+#Remake Our Graph  but with averaging by YEAR
+  physeq_topfam_year_plot <-  badger_topfam %>%  
+  microbiome::transform(transform = "compositional") %>%
+  plot_composition(average_by = "capture_year") + scale_fill_manual(values = barpal) + theme_classic() + labs(fill="Bacterial Family",x="Capture Year") + plotopts2 + theme(axis.text.x = element_text(angle=45,hjust=1, size = 14), axis.text.y = element_text(size = 14)) 
+
+  physeq_topfam_year_plot
+    #ggsave2('Badger Barplot by Year.pdf',physeq_topfam_year_plot,width=10,height=15,units="cm")
+    #ggsave2('Badger Barplot by Year.tiff',physeq_topfam_year_plot,width=10,height=15,units="cm")
+```
+
+### Social Group Grouping
+```{r}
+    #Remake Our Graph  but with averaging by Social Group
+  physeq_topfam_social_plot <-  badger_topfam %>%  
+  microbiome::transform(transform = "compositional") %>%
+  plot_composition(average_by = "social_group") + scale_fill_manual(values = barpal) + theme_classic() + labs(fill="Bacterial Family",x="Social Group") + plotopts2 + theme(axis.text.x = element_text(angle=45,hjust=1, size = 14), axis.text.y = element_text(size = 14)) + guides(fill="none")
+
+  physeq_topfam_social_plot
+        #ggsave2('Badger Barplot by SocialGroup.pdf',physeq_topfam_social_plot,width=15,height=10,units="cm")
+        #ggsave2('Badger Barplot by SocialGroup.tiff',physeq_topfam_social_plot,width=20,height=15,units="cm")
+
+```
+
+### Combined Plot 
+```{r}
+#Combined plot
+abundance_plots<-plot_grid(physeq_topfam_social_plot,physeq_topfam_year_plot,nrow=2,labels=c("A", "B"), label_size = 25)
+abundance_plots
+ggsave("Combined_Badger_Barplots.png", abundance_plots, width = 20, height = 30, units = "cm")
+#ggsave("Combined_Badger_Barplots.pdf", abundance_plots, width = 30, height = 20, units = "cm")
+
+
+```
+
+## CLR Transformation
+
+#### Function to Extract Variance Explained Percentages
+```{r}
+  pcsum_func<-function(ordobject){
+      pcsum<-summary(ordobject)
+      pc1r2<-signif(pcsum$cont$importance[2, "PC1"]*100,digits=3) 
+      pc2r2<-signif(pcsum$cont$importance[2, "PC2"]*100,digits=3) 
+      return(c(pc1r2,pc2r2))
+  }
+
+```
+
+### Prepare Data - Social Group Effects by Year
+```{r}
+
+#Subset All Samples
+  ps_clean_filter_s<-as(sample_data(ps_clean_filter),"data.frame")
+
+##Tabulate By Group and Year
+    grouptab<-with(ps_clean_filter_s,table(social_group,capture_year))
+  # 2016 Groups with 5 or more
+    bagdergroups2016<-rownames(grouptab)[grouptab[,1]>3]
+    bagdergroups2017<-rownames(grouptab)[grouptab[,2]>3]
+  #Subset Per Year 2016
+    ps_badger2016_orddata<-prune_samples(sample_data(ps_clean_filter)$social_group %in% bagdergroups2016 & sample_data(ps_clean_filter)$capture_year=="2016",ps_clean_filter) 
+   #Subset Per Year 2017
+    ps_badger2017_orddata<-prune_samples(sample_data(ps_clean_filter)$social_group %in% bagdergroups2017 & sample_data(ps_clean_filter)$capture_year=="2017",ps_clean_filter) 
+   
+     
+#### CLR Transform
+  ## Extract for Ordination and Plotting 2016  
+    ps_orddata2016_clr<-microbiome::transform(ps_badger2016_orddata,"clr")
+    badger_2016_clr_v<-vegan_otu(ps_orddata2016_clr)
+    badger_2016_clr_s<-as(sample_data(ps_orddata2016_clr),"data.frame")
+ ## Extract for Ordination and Plotting 2017  
+    ps_orddata2017_clr<-microbiome::transform(ps_badger2017_orddata,"clr")
+    badger_2017_clr_v<-vegan_otu(ps_orddata2017_clr)
+    badger_2017_clr_s<-as(sample_data(ps_orddata2017_clr),"data.frame")
+    
+##### Sort Out Consistent Colours for Each Group  
+    groups_bothyears<- c(bagdergroups2016,bagdergroups2017) %>% unique()
+    groupcols<-moma.colors("Warhol")[1:length(groups_bothyears)]
+    names(groupcols)<-groups_bothyears
+```
+
+### Social Group PCA Ordinations 2016
+```{r}
+    #Run PCA 
+      woodchester_2016_clr_pca<-rda(badger_2016_clr_v)
+
+    #Extract Variance Explained
+      social2016_pcvariance<-pcsum_func(woodchester_2016_clr_pca)
+  
+  #Inspect Plot 
+    gg_ordiplot(woodchester_2016_clr_pca,groups=badger_2016_clr_s$social_group,spiders = TRUE)
+    
+    #Extract for GGPLot2
+      social2016_ggord_data<-gg_ordiplot(woodchester_2016_clr_pca,groups=badger_2016_clr_s$social_group,spiders = TRUE,plot=FALSE) 
+      social2016_ggord_data2<-social2016_ggord_data$df_ord
+      #social2016_ggord_data2$capture_year<-woodchester_group5_clr_s$capture_year
+      
+  ##### PERMANOVA
+  badger_how_2016 <- how(nperm=9999, plots = Plots(strata=badger_2016_clr_s$id))
+  adonis2(badger_2016_clr_v ~ social_group,data=badger_2016_clr_s,by="mar",method="euclidean",how=badger_how_2016)
+  
+  #### DISPERSION
+   badger_2016_dispersion<-betadisper(vegdist(badger_2016_clr_v,"euclidean"),badger_2016_clr_s$social_group)
+    permutest(badger_2016_dispersion) 
+    
+  #Label for Plot from PERMANOVA    
+      badger2016graphlab<-paste("Social~Group~r^2==0.22\n~P==0.001")
+  #Plot   
+    badger_social2016_clr_plot1<-ggplot() + geom_segment(data=social2016_ggord_data$df_spiders,linewidth=1, aes(x=cntr.x, xend=x, y=cntr.y, yend=y, color=Group), show.legend = FALSE) 
+  #Plot Points  
+    badger_social2016_clr_plot2<- badger_social2016_clr_plot1 + geom_point(data=social2016_ggord_data2,aes(x=x,y=y,fill=Group),shape=21,color="white",size=5,alpha=0.8) + theme_bw() 
+ #Colour
+    badger_social2016_clr_plot3<- badger_social2016_clr_plot2 + labs(x=paste("PC1",social2016_pcvariance[1],"%"),y=paste("PC2",social2016_pcvariance[2],"%"),fill="Social Group") + plotopts + theme(legend.text = element_text(size=12), axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14)) + labs(fill="Social Group") + scale_fill_manual(values = groupcols) + scale_color_manual(values = groupcols)
+#Add Ellipses
+    badger_social2016_clr_plot4<- badger_social2016_clr_plot3 + geom_path(data = social2016_ggord_data$df_ellipse,linewidth=1, aes(x = x, y = y, color = Group), show.legend = FALSE) + annotate("text", x=-0.8, y=1.5, label=as.character(badger2016graphlab),size=6,parse=T) 
+  badger_social2016_clr_plot4
+    #ggsave2('CLR Beta Diversity Group5.pdf',badger_social1617_clr_plot4,width=25,height=10,units="cm")
+    #ggsave2('CLR Beta Diversity Group5.png',badger_social1617_clr_plot4,width=25,height=15,units="cm")
+    
+
+
+
+```
+
+### Social Group PCA Ordinations 2017
+```{r}
+    #Run PCA 
+      woodchester_2017_clr_pca<-rda(badger_2017_clr_v)
+
+    #Extract Variance Explained
+      social2017_pcvariance<-pcsum_func(woodchester_2017_clr_pca)
+  
+  #Inspect Plot 
+    gg_ordiplot(woodchester_2017_clr_pca,groups=badger_2017_clr_s$social_group,spiders = TRUE)
+    
+    #Extract for GGPLot2
+      social2017_ggord_data<-gg_ordiplot(woodchester_2017_clr_pca,groups=badger_2017_clr_s$social_group,spiders = TRUE,plot=FALSE) 
+      social2017_ggord_data2<-social2017_ggord_data$df_ord
+      #social2016_ggord_data2$capture_year<-woodchester_group5_clr_s$capture_year
+      
+##### PERMANOVA
+  badger_how_2017 <- how(nperm=9999, plots = Plots(strata=badger_2017_clr_s$id))
+  adonis2(badger_2017_clr_v ~ social_group,data=badger_2017_clr_s,by="mar",method="euclidean",how=badger_how_2017)
+  
+#### DISPERSION
+   badger_2017_dispersion<-betadisper(vegdist(badger_2017_clr_v,"euclidean"),badger_2017_clr_s$social_group)
+    permutest(badger_2017_dispersion)
+    
+  #Label for Plot from PERMANOVA    
+      badger2017graphlab<-paste("Social~Group~r^2==0.16\n~P==0.003")
+  #Plot   
+    badger_social2017_clr_plot1<-ggplot() + geom_segment(data=social2017_ggord_data$df_spiders,linewidth=1, aes(x=cntr.x, xend=x, y=cntr.y, yend=y, color=Group), show.legend = FALSE) 
+  #Plot Points  
+    badger_social2017_clr_plot2<- badger_social2017_clr_plot1 + geom_point(data=social2017_ggord_data2,aes(x=x,y=y,fill=Group),shape=21,color="white",size=5,alpha=0.8) + theme_bw() 
+ #Colour
+    badger_social2017_clr_plot3<- badger_social2017_clr_plot2 + labs(x=paste("PC1",social2017_pcvariance[1],"%"),y=paste("PC2",social2017_pcvariance[2],"%"),fill="Social Group") + plotopts + theme(legend.text = element_text(size=12), axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14)) + labs(fill="Social Group") + scale_fill_manual(values = groupcols) + scale_color_manual(values = groupcols)
+#Add Ellipses
+    badger_social2017_clr_plot4<- badger_social2017_clr_plot3 + geom_path(data = social2017_ggord_data$df_ellipse,linewidth=1, aes(x = x, y = y, color = Group), show.legend = FALSE) + annotate("text", x=0.8, y=1.5, label=as.character(badger2017graphlab),size=6,parse=T) 
+  badger_social2017_clr_plot4
+```
+
+### Prepare Data All Samples Complete Cases
+```{r}
+
+#Extract Matrix and Sample Data - Same Dataset for Richness
+  ps_badger_forclr<-prune_samples(sample_data(ps_clean_filter)$Sample %in% badger_rich_complete_age$Sample,ps_clean_filter)
+
+#CLR Transform 
+  ps_clr<-microbiome::transform(ps_badger_forclr,"clr")
+  woodchester_clr_v<-vegan_otu(ps_clr)
+  woodchester_clr_s<-as(sample_data(ps_clr),"data.frame")
+  woodchester_clr_s$sex<-badger_rich_complete$sex[match(woodchester_clr_s$Sample,badger_rich_complete$Sample)]
+  
+```
+
+### Prepare Data Tb Category Exposed/Unexposed/Excreter
+```{r}
+
+#Extract Matrix and Sample Data - Same Dataset for Richness
+  ps_badger_tb3cat<-prune_samples(sample_data(ps_clean_filter)$Sample %in% badger_rich_tbcat$Sample,ps_clean_filter)
+
+#CLR Transform 
+  ps_tb3cat_clr<-microbiome::transform(ps_badger_tb3cat,"clr")
+  woodchester_tb3cat_clr_v<-vegan_otu(ps_tb3cat_clr)
+  woodchester_tb3cat_clr_s<-as(sample_data(ps_tb3cat_clr),"data.frame")
+  woodchester_tb3cat_clr_s$sex<-badger_rich_complete$sex[match(woodchester_tb3cat_clr_s$Sample,badger_rich_complete$Sample)]
+  
+  
+### ORDINATE
+  woodchester_tb3cat_clr_pca<-rda(woodchester_tb3cat_clr_v)
+
+#Extract Variance Explained
+  woodchester_tb3cat_pcvariance<-pcsum_func(woodchester_tb3cat_clr_pca)
+  
+  #Inspect Plot 
+    gg_ordiplot(woodchester_tb3cat_clr_pca,groups=woodchester_tb3cat_clr_s$btb_status_time,spiders = TRUE)
+
+```
+
+
+
+## PERMANOVA
+
+### Categorical TB 
+```{r}
+    
+  #Betadisper 
+    badger_tb3cat_d<-vegdist(woodchester_tb3cat_clr_v,"euclidean")
+    badger_tb3cat_dispersion<-betadisper(badger_tb3cat_d,woodchester_tb3cat_clr_s$btb_status_time)
+    permutest(badger_tb3cat_dispersion)
+    
+    
+  #PERMANOVA
+    badger_how_cattb <- with(woodchester_tb3cat_clr_s,how(nperm=9999, blocks=id))
+
+    badger_tb3cat_clr_perm<-adonis2(woodchester_tb3cat_clr_v ~ id + btb_status_time + factor(capture_year) +factor(social_group) ,data=woodchester_tb3cat_clr_s,method="euclidean",by="mar",how=badger_how_cattb)
+    badger_tb3cat_clr_perm
+    
+  
+#   #Individual ID     
+#   badger_tb3cat_clr_id_perm<-adonis2(woodchester_tb3cat_clr_v ~ factor(id) ,data=woodchester_tb3cat_clr_s,method="euclidean",by="mar",how=badger_how_cattb)
+# badger_tb3cat_clr_id_perm
+
+```
+
+### Continuous Tb 
+```{r}
+### Complete Cases
+  nrow(woodchester_clr_s)
+  length(unique(woodchester_clr_s$social_group))
+  length(unique(woodchester_clr_s$id))
+  table(woodchester_clr_s$capture_year)
+  mean(complete.cases(woodchester_clr_s[,c("known_age","day0_cdp","social_group","sex","capture_year")])) #all complete data
+    
+  woodchester_clr_s$social_group<-factor(woodchester_clr_s$social_group)
+
+
+### BETADISPER to Check Dispersion Assumptions
+
+#Distance Matrix
+    woodchester_clr_d<-vegdist(woodchester_clr_v,"euclidean")
+#Social Group
+    badger_social_dispersion<-betadisper(woodchester_clr_d,woodchester_clr_s$social_group)
+    permutest(badger_social_dispersion)
+#Capture Year
+    badger_captureyear_dispersion<-betadisper(woodchester_clr_d,woodchester_clr_s$capture_year)
+    permutest(badger_captureyear_dispersion)
+
+### ADONIS / PERMANOVA
+
+#Constraint of ID
+    badger_how <- with(woodchester_clr_s,how(nperm=9999, blocks=id))
+
+#Fit Model Type III SS
+  badger_clr_perm<-adonis2(woodchester_clr_v ~  social_group + factor(capture_year) + known_age + day0_cdp  ,data=woodchester_clr_s,method="euclidean",by="mar",permutations=badger_how)
+  badger_clr_perm
+  
+```
+
+
+## Ordinations
+
+### Prepare Data 
+```{r}
+  library(ggordiplots)
+  
+  ##Tabulate By Group and Year
+    grouptab<-with(woodchester_clr_s,table(social_group,capture_year))
+  # 2016 Groups with 5 or more
+    bagdergroups2016<-rownames(grouptab)[grouptab[,1]>3]
+    bagdergroups2017<-rownames(grouptab)[grouptab[,2]>3]
+  #Subset Per Year 2016
+    ps_badger2016_orddata<-prune_samples(sample_data(ps_badger_forclr)$social_group %in% bagdergroups2016 & sample_data(ps_badger_forclr)$capture_year=="2016",ps_badger_forclr) 
+   #Subset Per Year 2017
+    ps_badger2017_orddata<-prune_samples(sample_data(ps_badger_forclr)$social_group %in% bagdergroups2017 & sample_data(ps_badger_forclr)$capture_year=="2017",ps_badger_forclr) 
+   
+```
+
+
+
+### PCA Ordination (CLR) Individual ID
+```{r}
+##Tabulate By Group and Year
+    idtab<-with(sample_data(ps_clean_filter),table(id))
+  # 3 or more Obs
+    id3plus<-names(idtab)[idtab>2]
+    ps_badger_id_orddata<-prune_samples(sample_data(ps_clean_filter)$id %in% id3plus,ps_clean_filter)
+ 
+  ## Extract for Ordination and Plotting 2016  
+    ps_badger_id_clr<-microbiome::transform(ps_badger_id_orddata,"clr")
+    badger_id_clr_v<-vegan_otu(ps_badger_id_clr)
+    badger_id_clr_s<-as(sample_data(ps_badger_id_clr),"data.frame")
+    
+
+    #Run PCA 
+        id_clr_pca<-rda(badger_id_clr_v)
+    #Variance
+      id_variance<-pcsum_func(id_clr_pca)
+  #Test Ordinate
+        gg_ordiplot(id_clr_pca,groups=badger_id_clr_s$id,spiders = TRUE)
+
+###### PLOT
+
+      id_ggord_data<-gg_ordiplot(id_clr_pca,groups=badger_id_clr_s$id,spiders = TRUE,plot=FALSE) 
+      id_ggord_data2<-id_ggord_data$df_ord
+
+        #Plot   
+          id_clr_plot1<-ggplot() + geom_segment(data=id_ggord_data$df_spiders,linewidth=1, aes(x=cntr.x, xend=x, y=cntr.y, yend=y, color=Group), show.legend = FALSE) 
+        #Plot Points  
+          id_clr_plot2<- id_clr_plot1 + geom_point(data=id_ggord_data2,aes(x=x,y=y,fill=Group),shape=21,color="white",size=5,alpha=0.8) + theme_bw() 
+       #Colour
+          id_clr_plot3<- id_clr_plot2 + labs(x=paste("PC1",id_variance[1],"%"),y=paste("PC2",id_variance[2],"%"),fill="ID") + plotopts + theme(legend.text = element_text(size=12), axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14)) 
+      #Add Ellipses
+          id_clr_plot4<- id_clr_plot3 + geom_path(data = id_ggord_data$df_ellipse,linewidth=1, aes(x = x, y = y, color = Group), show.legend = FALSE)
+      id_clr_plot4
+```
+
+### Disease Class 
+```{r}
+
+ #Inspect Plot 
+    gg_ordiplot(woodchester_tb3cat_clr_pca,groups=woodchester_tb3cat_clr_s$btb_status_time,spiders = TRUE)
+ 
+  #Variance
+      tb3cat_variance<-pcsum_func(woodchester_tb3cat_clr_pca)
+  
+ #Extract for GGPLot2
+      tb3cat_ggord_data<-gg_ordiplot(woodchester_tb3cat_clr_pca,groups=woodchester_tb3cat_clr_s$btb_status_time,spiders = TRUE,plot=FALSE) 
+      tb3cat_ggord_data2<-tb3cat_ggord_data$df_ord
+
+  #Plot   
+    tb3cat_clr_plot1<-ggplot() + geom_segment(data=tb3cat_ggord_data$df_spiders,linewidth=1, aes(x=cntr.x, xend=x, y=cntr.y, yend=y, color=Group), show.legend = FALSE) 
+  #Plot Points  
+    tb3cat_clr_plot2<- tb3cat_clr_plot1 + geom_point(data=tb3cat_ggord_data2,aes(x=x,y=y,fill=Group),shape=21,color="white",size=5,alpha=0.8) + theme_bw() 
+ #Colour
+    tb3cat_clr_plot3<- tb3cat_clr_plot2 + labs(x=paste("PC1",tb3cat_variance[1],"%"),y=paste("PC2",tb3cat_variance[2],"%"),fill="bTb Status") + plotopts + theme(legend.text = element_text(size=12), axis.text.y = element_text(size = 14), axis.text.x = element_text(size = 14)) + scale_fill_manual(values=tbcols) + scale_color_manual(values=tbcols)
+#Add Ellipses
+    tb3cat_clr_plot4<- tb3cat_clr_plot3 + geom_path(data = tb3cat_ggord_data$df_ellipse,linewidth=1, aes(x = x, y = y, color = Group), show.legend = FALSE) + theme(legend.position = "top")
+  tb3cat_clr_plot4
+```
+
+### Combined Plot - Beta Diversity
+```{r}
+
+ordinationplot1<-plot_grid(badger_social2016_clr_plot4,badger_social2017_clr_plot4,nrow=2,labels="AUTO",label_size = 30)
+ordinationplot1
+ggsave2('Badger Ordination Grid.png',ordinationplot1,width=25,height=35,units="cm")
+
+```
+
+### COmbined Plot - Categorical Tb Alpha & Beta 
+```{r}
+
+cattb_plot1<-plot_grid(richplot_tbcat2,richplot_tb_statustime_soc1,tb3cat_clr_plot4,nrow=3,labels="AUTO",label_size = 20,rel_heights = c(1,1.5,1))
+ggsave2('Categorical Tb Composite Plot.png',cattb_plot1,width=20,height=40,units="cm")
+```
+
+
+# Individual Dynamics 
+
+## Extract Values
+```{r}
+   
+   ### All Badger CLR 
+    ps_all_clr<-microbiome::transform(ps_clean_filter,"clr")
+    ps_all_clr_v<-vegan_otu(ps_all_clr)
+    ps_all_clr_s<-as(sample_data(ps_all_clr),"data.frame")
+    ps_all_ord<-rda(ps_all_clr_v)
+    ps_all_scores<-scores(ps_all_ord)$sites
+    ps_all_scores2<-cbind(ps_all_scores,ps_all_clr_s)
+  
+      ps_all_scores2$Sample<-rownames(ps_all_scores2)
+  ps_all_scores2$observed_richness<-badger_rich$Observed[match(ps_all_scores2$Sample,badger_rich$Sample)]
+#Subset
+  ps_all_scores3<-subset(ps_all_scores2,!is.na(known_age))
+#Sample Size  
+  nrow(ps_all_scores3)
+  length(unique(ps_all_scores3$id))
+
+
+```
+
+
+## Age PC1 Individual Level 
+```{r}
+  #### Dynamics with Age for Repeat Sampled Badger
+    badger_beta_tab<-table(ps_all_scores2$id,ps_all_scores2$known_age)
+    badger_beta_tab2<-apply(badger_beta_tab,1,function(x)sum(x>0))
+    badger_beta_complete_min3<-subset(ps_all_scores2,id %in% names(badger_beta_tab2)[badger_beta_tab2>2])
+    table(badger_beta_complete_min3$id)
+    
+## Factor 
+      badger_beta_complete_min3$btb_status_time<-factor(badger_beta_complete_min3$btb_status_time,levels=c("Unexposed","Exposed","Excreter"))
+      
+#### PLOT    
+   pc1_age_plot1<-ggplot(badger_beta_complete_min3,aes(x=known_age,y=PC1,fill=id)) + geom_smooth(method="lm",se=F) + geom_point(shape=21,size=5) + theme_bw() + plotopts + labs(y="Beta Diversity (PC1)",x="Age") + scale_x_continuous(n.breaks=11) + facet_wrap(.~id) + guides(fill="none") + scale_fill_manual(values=MoMAColors::moma.colors("Levine2",6)) + theme(panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), axis.text.y = element_text(size = 14))
+   pc1_age_plot1
+   
+#### PLOT with DIsease Class
+   pc1_age_dc_plot1<-ggplot(badger_beta_complete_min3,aes(x=known_age,y=PC1,fill=btb_status_time)) + geom_smooth(method="lm",se=F) + geom_point(shape=21,size=5,colour="white") + theme_bw() + plotopts + labs(y="Beta Diversity (PC1)",x="Age",fill="bTb Status") + scale_x_continuous(n.breaks=11) + facet_wrap(.~id)  + scale_fill_manual(values=tbcols) + theme(panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), axis.text.y = element_text(size = 14),legend.position = "right")
+   pc1_age_dc_plot1
+```
+
+### Age Richness Individual Level 
+
+```{r}
+
+ #### Dynamics with Age for Repeat Sampled Badger
+    badger_rich_tab<-table(badger_rich$id,badger_rich$known_age)
+    badger_rich_tab2<-apply(badger_rich_tab,1,function(x)sum(x>0))
+    badger_rich_complete_min3<-subset(badger_rich,id %in% names(badger_rich_tab2)[badger_rich_tab2>2])
+    table(badger_rich_complete_min3$id)
+    
+  badger_rich_complete_min3$btb_status_time<-factor(badger_rich_complete_min3$btb_status_time,levels=c("Unexposed","Exposed","Excreter"))
+  
+#### PLOT    
+   rich_age_plot1<-ggplot(badger_rich_complete_min3,aes(x=known_age,y=Observed,fill=id)) + geom_smooth(method="lm",se=F) + geom_point(shape=21,size=5) + theme_bw() + plotopts + labs(y="Alpha Diversity (Richness)",x="Age") + scale_x_continuous(n.breaks=11) + facet_wrap(.~id) + guides(fill="none") + scale_fill_manual(values=MoMAColors::moma.colors("Levine2",6))+ theme(panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), axis.text.y = element_text(size = 14))
+   rich_age_plot1
+  
+   rich_age_dc_plot1<-ggplot(badger_rich_complete_min3,aes(x=known_age,y=Observed,fill=btb_status_time)) + geom_smooth(method="lm",se=F) + geom_point(shape=21,size=5,colour="white") + theme_bw() + plotopts + labs(y="Alpha Diversity (Richness)",x="Age",fill="bTb Status") + scale_x_continuous(n.breaks=11) + facet_wrap(.~id) + scale_fill_manual(values=tbcols)+ theme(panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(), axis.text.y = element_text(size = 14),legend.position = "right")
+   rich_age_dc_plot1 
+```
+
+### Combined Age Dynamics Plot 
+
+```{r}
+#age_rich3,temporal_age_plot2,
+age_grid1<-plot_grid(rich_age_dc_plot1,pc1_age_dc_plot1,nrow=2,labels="AUTO",label_size = 25)
+#ggsave2('Age Dynamics Plot.pdf',age_grid1,width=28,height=12,units="cm")
+#ggsave2('Age Dynamics Plot.png',age_grid1,width=25,height=25,units="cm")
+
+```
+
+### Stacked Barplot By Age
+
+```{r}
+
+# #Known Age
+#   ps_age<-prune_samples(sample_data(ps_rare)$id %in% ps_all_scores3$id & !is.na(sample_data(ps_rare)$known_age),ps_rare)
+# 
+# #Filter to Top 5 Phyla
+#   ps_age_top5phylum_filter<-subset_taxa(ps_age,Phylum %in% physeq_top5phyla)
+#   
+# #Plot Data
+#   ps_age_top5phylum_data <- ps_age_top5phylum_filter %>%
+#     microbiome::aggregate_taxa(level = "Phylum") %>%  
+#     microbiome::transform(transform = "compositional") %>% plot_composition(sample.sort = "known_age") 
+#   
+# #Copy Across ID  
+#   ps_age_top5phylum_data2<-ps_age_top5phylum_data$data
+#   ps_age_top5phylum_data2$id<-sample_data(ps_age_top5phylum_filter)$id[match(ps_age_top5phylum_data2$Sample,sample_data(ps_age_top5phylum_filter)$Sample)]
+#   
+#    ps_age_top5phylum_data2$age<-sample_data(ps_age_top5phylum_filter)$known_age[match(ps_age_top5phylum_data2$Sample,sample_data(ps_age_top5phylum_filter)$Sample)]
+#    
+# #Plot
+#   ps_age_top5phylum_plot <- ggplot(ps_age_top5phylum_data2, aes(x = xlabel, y = Abundance, fill = Tax)) + scale_x_discrete(breaks = ps_age_top5phylum_data2$xlabel,labels=as.character(ps_age_top5phylum_data2$age)) + geom_bar(position = "stack", stat = "identity") + facet_wrap(~id, scales = "free") + theme_bw() + scale_fill_manual(values = moma.colors("Levine2", direction = -1)) + labs(fill="Bacterial Phylum",x="Age") 
+#   ps_age_top5phylum_plot
+#   
+#         ggsave2('Badger Barplot by Age.pdf',ps_age_top5phylum_plot,width=30,height=30,units="cm")
+#         ggsave2('Badger Barplot by Age.tiff',ps_age_top5phylum_plot,width=30,height=30,units="cm")
+# 
+# 
+# ```
+# 
+# ## PC1 Over Time (Date) by Infection Probability 
+# Uses A different dataset filtered to known infection badgers
+# ```{r}
+#            
+#   #Subset To Individualls with Multiuple entires 
+#     woodchester_temp_table<-table(ps_all_scores2$id)
+#     woodchester_scores_sub<-subset(ps_all_scores2,id %in% names(woodchester_temp_table)[woodchester_temp_table>2])
+#    
+#           temporal_plot1<-ggplot(woodchester_scores_sub,aes(x=sampledate_julian,y=PC1)) + geom_smooth(method="lm",se=F)+ geom_point(size=5,shape=21,aes(fill=day0_cdp),color="gray77")   
+#           temporal_plot2<- temporal_plot1+ facet_wrap(.~id) + labs(x= "Julian Day",fill="M. bovis Infection Probability") + theme_bw() + theme(axis.text=element_text(size=15),strip.text.x=element_text(size=15),axis.title=element_text(size=15),legend.position = "top",axis.text.x=element_text(angle=90,hjust=1)) 
+#           temporal_plot3<- temporal_plot2 + scale_fill_moma_c("Exeter")
+#           temporal_plot3
+#               ggsave2('Infection PC1 Temporal Plot.pdf',temporal_plot3,height=18,width=20,units="cm")
+#               ggsave2('Infection PC1 Temporal Plot.tiff',temporal_plot3,height=18,width=20,units="cm")
+#             
+          
+```
+
+
+# General Linear Latent Variable Models - Continuous Tb 
+
+```{r}
+
+## OTUs Top 50
+  badger_genus<-aggregate_top_taxa2(ps_badger_forclr, "Genus", top = 50)
+  clr_scaled <-microbiome::transform(badger_genus, transform = "clr")
+
+#Extract
+  ys <- data.frame(t(otu_table(clr_scaled)))
+  names(ys) <-taxa_names(clr_scaled)
+  
+#Predictors
+  Xs<-data.frame(sample_data(clr_scaled)) %>% select(id,day0_cdp,known_age,social_group,capture_year)
+  Xs$sex<-badger_rich_complete_age$sex[match(rownames(Xs),badger_rich_complete_age$Sample)]
+  Xs$capture_year<-factor(Xs$capture_year)
+
+#Define Study Design  
+  sDesign<-data.frame(id = Xs$id)
+
+## Model 
+  fit_reduced_scaled <- gllvm(ys, Xs, 
+                              num.lv = 3,
+                              formula = ~ capture_year + day0_cdp * known_age + sex, 
+                              family = "gaussian",
+                              row.eff = ~(1|id),starting.val='random', studyDesign = sDesign)
+  
+    coefplot(fit_reduced_scaled)
+
+
+
+#Estimates 
+  df<-coef(fit_reduced_scaled)
+  est_df<-data.frame(df$Intercept)
+  est_df2<-data.frame(df$Xcoef) 
+  est_df3<-merge(est_df, est_df2, by = 0)
+  
+#Order genera
+  row.names(est_df3)<-est_df3$Row.names
+  est_df3<-est_df3[colnames(ys),]
+  names(est_df3)[1]<- "Genus"
+  names(est_df3)[2]<- "Intercept"
+  
+
+### COnfidence Intervals
+  confint_df<-data.frame(confint(fit_reduced_scaled))
+  
+#Identify Rows with Main Effects
+   one_comma<-sapply(rownames(confint_df),function(x) length(gregexpr(":", x, fixed = TRUE)[[1]]))==1
+   
+###Strip Out Individual Datasets
+  
+  ##CDP
+    cdp_main<-grepl("^Xcoef.day0_cdp",rownames(confint_df))
+    int_data_day0cdp<-cbind(est_df3[,c("Genus","day0_cdp")],confint_df[cdp_main+one_comma==2,])
+  ##Sex
+    sex_main<-grepl("^Xcoef.sexM",rownames(confint_df))
+    int_data_sexM<-cbind(est_df3[,c("Genus","sexM")],confint_df[sex_main,])
+  ##Age
+    age_main<-grepl("^Xcoef.known_age",rownames(confint_df))
+    int_data_age<-cbind(est_df3[,c("Genus","known_age")],confint_df[age_main+one_comma==2,])
+  #  ##Tb Sex Interaction
+  #int_data_sex_day0<-cbind(est_df3[,c("Genus","sexM.day0_cdp")],confint_df[grep("Xcoef.sexM:day0_cdp",rownames(confint_df)),]) 
+    #Age: Tb Interaction
+  int_data_age_tb<-cbind(est_df3[,c("Genus","day0_cdp.known_age")],confint_df[grep("Xcoef.day0_cdp:known_age",rownames(confint_df)),])
+  # 
+ 
+  
+#Extra Variables and Rename Columns 
+  colnames(int_data_day0cdp)<-c("Genus","Estimate","l95","u95")
+  colnames(int_data_sexM)<-c("Genus","Estimate","l95","u95")
+  colnames(int_data_age)<-c("Genus","Estimate","l95","u95")
+  colnames(int_data_age_tb)<-c("Genus","Estimate","l95","u95")
+  #colnames(int_data_sex_day0)<-c("Genus","Estimate","l95","u95")
+
+  int_data_day0cdp$trait<-"Infection Probability"
+  int_data_sexM$trait<-"sex Male"
+  int_data_age$trait<-"Age"
+  int_data_age_tb$trait<-"Age:Infection"
+  #int_data_sex_day0$trait<-"Male:Infection"
+    
+  tb_mod_plotdata<-rbind(int_data_day0cdp,int_data_sexM,int_data_age,int_data_age_tb)
+
+#Order   
+  tb_mod_plotdata$trait<-factor(tb_mod_plotdata$trait,levels=c("sex Male","Age","Infection Probability","Age:Infection"))
+  tb_mod_plotdata2<- tb_mod_plotdata %>% group_by(trait)  %>% arrange(Estimate,.by_group=T)
+  tb_mod_plotdata2$Genus<-factor(tb_mod_plotdata2$Genus,levels=unique(tb_mod_plotdata2$Genus))
+#Significance  
+  tb_mod_plotdata2$Sig<- !data.table::between(0, tb_mod_plotdata2$l95, tb_mod_plotdata2$u95)
+
+   sig_col<-moma.colors("Levine2")[6]
+
+##Subset
+   tb_mod_plotdata_sigtab<-with(tb_mod_plotdata2,table(Genus,Sig))
+   tb_mod_plotdata_sigsubset<-subset(tb_mod_plotdata2,Genus %in% rownames(tb_mod_plotdata_sigtab)[tb_mod_plotdata_sigtab[,2]>0])
+   
+### Plot
+  tb_plot1<-ggplot(tb_mod_plotdata_sigsubset,aes(x=Estimate,y=Genus)) + geom_errorbarh(aes(xmin=l95,xmax=u95,color=Sig),linewidth = 1.2,alpha=0.7) + geom_point(size=7,shape=21,color="gray40",aes(fill=Sig),alpha=0.7)
+  tb_plot2<- tb_plot1 + theme_bw(base_size = 20) + geom_vline(xintercept=0,linetype="dashed") + scale_color_manual(values=c("gray77",sig_col)) + scale_fill_manual(values=c("white",sig_col)) + guides(fill="none",color="none") + facet_wrap(.~trait,scales = "free_x", nrow = 1) + 
+    theme(
+    axis.text = element_text(size = 22),
+    axis.title = element_text(size = 26),
+    strip.text = element_text(size = 25))
+  tb_plot2
+  
+ggsave('Age Infection GLLVM plot.png', tb_plot2, width = 45, height = 20,units="cm")
+  
+#### Correlations
+  cr1<-data.frame(getResidualCor(fit_reduced_scaled))#
+  
+  names(cr1)<-names(ys)
+  names(cr1)<-abbreviate(names(cr1), minlength = 15)
+  rownames(cr1)<-abbreviate(rownames(cr1), minlength = 15 )
+  
+  library(rstatix)
+  #devtools::install_github("kassambara/ggcorrplot")
+  library(ggcorrplot)
+  #install.packages("ggpubr")
+  library(ggpubr)
+  
+  cr2<-cor_pmat(cr1)
+  
+  corplot<-ggcorrplot(cr1, 
+                      hc.order = TRUE,
+                      outline.col = "white",
+                      type = "full",
+                      ggtheme = ggplot2::theme_minimal(base_size = 10),
+                      tl.cex = 12,
+                      p.mat = cr2,
+                      sig.level = 0.05,
+                      lab_size = 30,
+                      #show.diag = F,
+                      insig = "blank",
+                      # colors = c("#6D9EC1", "white", "#E46726"))
+                      colors = c("blue", "white", "red"))+
+    theme(axis.text.x = element_text(angle = 90, vjust=0.5, size = 20), axis.text.y = element_text(size = 20),legend.text = element_text(size=20),legend.title = element_text(size=25),legend.key.size = unit(1, 'cm'))+
+    theme(plot.margin=unit(c(0.2,0.2,0.2,2),"cm"))
+  corplot
+  
+ggsave('Correlation plot.png', corplot, width = 40, height = 40,units="cm")
+  
+## Save Grid
+  #tb_mod_combined1<-ggarrange(tb_plot2,corplot,nrow=2,heights=c(0.8,1),widths=c(1,1),align="h",labels="AUTO",font.label=list(size=50))
+  #tb_mod_combined1
+   # cowplot::ggsave2('Tb Combined Model Outputs.png',tb_mod_combined1,width=20,height=25)
+  #  cowplot::ggsave2('Tb Combined Model Outputs.pdf',tb_mod_combined1,width=20,height=25)
+
+
+```
+
+# General Linear Latent Variable Models - Categorical Tb 
+
+```{r}
+
+## OTUs Top 50
+  ps_badger_gllvmdata<-subset_samples(ps_badger_forclr,!is.na(sample_data(ps_badger_forclr)$btb_status_time))
+  badger_gllvmdata_genus<-aggregate_top_taxa2(ps_badger_gllvmdata, "Genus", top = 50)
+  clr_scaled_tbcat <-microbiome::transform(badger_gllvmdata_genus, transform = "clr")
+
+#Extract
+  y_cattb <- data.frame(t(otu_table(clr_scaled_tbcat)))
+  names(y_cattb) <-taxa_names(clr_scaled_tbcat)
+  
+#Predictors
+  X_cattb<-data.frame(sample_data(badger_gllvmdata_genus)) %>% select(id,btb_status_time,known_age,social_group,capture_year)
+  X_cattb$sex<-badger_rich_complete_age$sex[match(rownames(X_cattb),badger_rich_complete_age$Sample)]
+  X_cattb$capture_year<-factor(X_cattb$capture_year)
+  X_cattb$btb_status_time<-factor(X_cattb$btb_status_time,levels=c("Unexposed","Exposed","Excreter"))
+  
+#Define Study Design  
+  sDesign_cattb<-data.frame(id = X_cattb$id)
+
+## Model 
+  fit_cattb1 <- gllvm(y_cattb, X_cattb, 
+                              num.lv = 2,
+                              formula = ~ capture_year + btb_status_time * known_age + sex, 
+                              family = "gaussian",
+                              row.eff = ~(1|id),starting.val='random', studyDesign = sDesign_cattb)
+  
+  #coefplot(fit_cattb1)
+```
+
+## Plots of Genera by Predictor
+
+### Age
+```{r}
+
+badger_gllvmdata_genus
+otu_table(badger_gllvmdata_genus)
+
+#Fusobacterium Age 
+  fuso_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Fusobacterium"),]),age=sample_data(badger_genus)$known_age)
+  
+  fusoplot1<-ggplot(fuso_df,aes(x=age,y=count)) + geom_smooth(method="lm") + geom_point(fill= moma.colors("Andri",3)[3],alpha=0.7,shape=21,size=5,position = position_jitter(width=0.1)) + theme_bw(base_size=15) + labs(x="Badger Age",y="Rel. Abundance \n (CLR-Transformed") + scale_x_continuous(breaks = seq(0,10,1)) + geom_text(x=8,y=-2.5,label="Fusobacterium",cex=7)
+fusoplot1
+
+#Morganella Age 
+  morganella_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Morganella"),]),age=sample_data(badger_genus)$known_age)
+  
+  morganplot1<-ggplot(morganella_df,aes(x=age,y=count)) + geom_smooth(method="lm") + geom_point(fill= moma.colors("Andri",1),shape=21,size=5,position = position_jitter(width=0.1),alpha=0.7,colour="white") + theme_bw() + labs(x="Badger Age",y="Morganella Rel. Abundance \n (CLR-Transformed") + scale_x_continuous(breaks = seq(0,10,1)) 
+  morganplot1
+  
+#Ligilactobacillus Age 
+  ligil_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Ligilactobacillus"),]),age=sample_data(badger_genus)$known_age)
+  
+  ligilplot1<-ggplot(ligil_df,aes(x=age,y=count)) + geom_smooth(method="lm") + geom_point(fill= moma.colors("Andri",1),alpha=0.7,shape=21,size=5,position = position_jitter(width=0.1)) + theme_bw(base_size=15) + labs(x="Badger Age",y="Rel. Abundance \n (CLR-Transformed") + scale_x_continuous(breaks = seq(0,10,1)) + geom_text(x=8,y=7,label="Ligilactobacillus",cex=7)
+  ligilplot1
+  
+#Lactobacillus Infection 
+  lacto_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Lactobacillus"),]),age=sample_data(badger_genus)$known_age,infection=sample_data(badger_genus)$day0_cdp)
+  
+  lactoplot1<-ggplot(lacto_df,aes(x=infection,y=count)) + geom_smooth(method="lm") + geom_point(fill= moma.colors("Flash",1),alpha=0.7,shape=21,size=5,position = position_jitter(width=0.1)) + theme_bw(base_size=15) + labs(x="M. bovis Infection Probability",y="Rel. Abundance \n (CLR-Transformed") + scale_x_continuous(breaks = seq(0,1,0.1)) + geom_text(x=0.8,y=3,label="Lactobacillus",cex=7)
+  lactoplot1
+  
+```
+
+### Age: Infection
+  
+```{r}  
+  
+#Bacteroides 
+  bacteroides_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Bacteroides"),]),age=(sample_data(badger_genus)$known_age),infection=sample_data(badger_genus)$day0_cdp)
+
+#Model to Pull Out Interaction
+  bacmod1<-glm(count ~ age*infection,data=bacteroides_df)
+  bac_newdf<-data.frame(infection=rep(c(0,1),each=10),age=rep(seq(10),2))
+  bac_newdf$count<-predict(bacmod1,newdata = bac_newdf)
+  
+  bacteroidesplot1<-ggplot(data=bacteroides_df,aes(x=age,y=count)) + geom_point(aes(fill=infection),shape=21,size=5,position = position_jitter(width=0.1)) + theme_bw(base_size=15) +  scale_fill_moma_c("Exter") + labs(fill="M. bovis \nInfection Probability",x="Badger Age",y="Relative Abundundance \n (CLR-Transformed)")
+bacteroidesplot2<-bacteroidesplot1 + geom_line(data=bac_newdf,aes(x=age,y=count,group=factor(infection),colour = factor(infection)),cex=2) + scale_color_manual(values=moma.colors("Exter",5)[c(1,5)]) + guides(color=FALSE) + theme(legend.position = "top") + scale_x_continuous(breaks = seq(0,10,1)) + geom_text(x=8,y=-1,label="Bacteroides",cex=7)
+bacteroidesplot2  
+
+  #Clostridium 
+  clost_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Clostridium sensu stricto 13"),]),age=(sample_data(badger_genus)$known_age),infection=sample_data(badger_genus)$day0_cdp)
+  
+#Model to Pull Out Interaction
+  clostmod1<-glm(count ~ age*infection,data=clost_df)
+  clost_newdf<-data.frame(infection=rep(c(0,1),each=10),age=rep(seq(10),2))
+  clost_newdf$count<-predict(clostmod1,newdata = clost_newdf)
+
+  clostplot1<-ggplot(clost_df,aes(x=age,y=count)) + geom_point(shape=21,size=5,aes(fill=infection),position = position_jitter(width=0.1)) + theme_bw(base_size=15) +  scale_fill_moma_c("Exter") + labs(fill="M. bovis \nInfection Probability",x="Badger Age",y="Relative Abundance \n (CLR-Transformed)") + geom_text(x=6,y=6,label="Clostridium \nSensu Stricto 13",cex=7)
+ clostplot2<-clostplot1 + geom_line(data=clost_newdf,aes(x=age,y=count,group=factor(infection),colour = factor(infection)),cex=2) + scale_color_manual(values=moma.colors("Exter",5)[c(1,5)]) + guides(color=FALSE) + theme(legend.position = "top") + scale_x_continuous(breaks = seq(0,10,1)) 
+clostplot2
+ 
+ 
+ 
+ 
+ #Staph 
+  staph_df<-data.frame(count=as.numeric(otu_table(clr_scaled)[which(rownames(otu_table(clr_scaled))=="Staphylococcus"),]),age=factor(sample_data(badger_genus)$known_age),infection=sample_data(badger_genus)$day0_cdp)
+  
+  staphplot1<-ggplot(staph_df,aes(x=age,y=count)) + geom_smooth(method="lm") + geom_point(shape=21,size=5,aes(fill=infection),position = position_jitter(width=0.1)) + theme_bw(base_size=15) +  scale_fill_moma_c("Exter") + labs(fill="M. bovis \nInfection Probability",x="Badger Age",y="Staphylococcus Rel. Abund. \n (CLR-Transformed)")
+ staphplot1
+     
+#Salmonella 
+  salmonella_df<-data.frame(count=as.numeric(otu_table(clr_scaled_tbcat)[which(rownames(otu_table(clr_scaled_tbcat))=="Salmonella"),]),age=sample_data(badger_gllvmdata_genus)$known_age)
+  
+  ggplot(salmonella_df,aes(x=age,y=count)) + geom_smooth(method="lm") + geom_point(shape=21,size=5,fill="lightblue",position = position_jitter(width=0.1)) + theme_bw()   
+```
+
+## Combined Plot
+
+```{r}
+
+gllvmplot1<-plot_grid(fusoplot1,ligilplot1,lactoplot1,bacteroidesplot2,clostplot2,nrow=2,ncol=3,labels="AUTO",label_size=20)
+gllvmplot1
+ggsave2('Badger Genus Trends.png',gllvmplot1,width=40,height = 25,units="cm")
+```
